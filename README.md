@@ -1,5 +1,4 @@
-cat > README.md << 'EOF'
-# 🐯 Tigerd
+# Tigerd
 
 <div align="center">
 	<img
