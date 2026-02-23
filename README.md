@@ -25,7 +25,6 @@ This repo contains the full distribution source code for Tigerd. If you're new, 
 Tigerd is built on these open source foundations:
 
 - [Void Editor](https://github.com/voideditor/void) — Apache-2.0
-- [OpenCode](https://github.com/sst/opencode) — MIT
 - [VS Code](https://github.com/microsoft/vscode) — MIT
 
 For a guide to the codebase see [TIGERD_CODEBASE_GUIDE](https://github.com/miiglu/tigerd/blob/main/TIGERD_CODEBASE_GUIDE.md).
