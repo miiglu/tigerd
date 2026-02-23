@@ -1,0 +1,15 @@
+TIGERD — THIRD PARTY NOTICES
+==============================
+
+1. Void Editor
+   Source:  https://github.com/voideditor/void
+   License: Apache-2.0
+   Copyright (c) 2024 Glass Devtools, Inc.
+
+2. OpenCode
+   Source:  https://github.com/sst/opencode
+   License: MIT
+   Copyright (c) 2024 SST Inc.
+
+Tigerd modifications:
+   Copyright (c) 2026 Miiglu Ltd
