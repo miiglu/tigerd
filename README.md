@@ -38,4 +38,3 @@ Reach us on Discord or via email: hello@tigerd.dev
 ## License
 
 Apache-2.0 — Modifications Copyright 2026 Miiglu Ltd.
-EOF
