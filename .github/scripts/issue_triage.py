@@ -1,164 +1,172 @@
-#!/usr/bin/env python
-from __future__ import annotations
-import os, sys, json, datetime, pathlib, textwrap, requests
-from openai import OpenAI
+#!/usr/bin/env python3
+"""
+Tigerd Issue Triage Script
+Fetches GitHub issues and uses Claude to categorize them into a wiki roadmap.
+"""
 
-REPO = "voideditor/void"
-CACHE_FILE = pathlib.Path(".github/triage_cache.json")
-STAMP_FILE = pathlib.Path(".github/last_triage.txt")
+import os
+import json
+import requests
+import anthropic
+from datetime import datetime
 
-THEMES_MD = textwrap.dedent("""\
-1. 🔗 LLM Integration & Provider Support
-2. 🖥 App Build & Platform Compatibility
-3. 🎯 Prompt, Token, and Cost Management
-4. 🧩 Editor UX & Interaction Design
-5. 🤖 Agent & Automation Features
-6. ⚙️ System Config & Environment Setup
-7. 🗃 Meta: Feature Comparison, Structure, and Naming
-""").strip()
+GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
+ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+REPO = os.environ.get("REPO", "miiglu/tigerd")
 
-client  = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-headers = {"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}"}
+HEADERS = {
+    "Authorization": f"token {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github+json",
+}
+
+TIGERD_CATEGORIES = [
+    "Bug - IDE/Editor",
+    "Bug - Tigerd Agent",
+    "Bug - Cloudflare/AI",
+    "Bug - Backend/Auth",
+    "Feature Request - IDE",
+    "Feature Request - Agent",
+    "Feature Request - Billing/Plans",
+    "Feature Request - Onboarding",
+    "Question/Support",
+    "Documentation",
+    "Other",
+]
 
 
-# ───────── helpers ────────────────────────────────────────────────────────
-def utc_iso_now() -> str:
-    return datetime.datetime.utcnow().replace(microsecond=0, tzinfo=datetime.timezone.utc).isoformat()
-
-def read_stamp() -> str:
-    return STAMP_FILE.read_text().strip() if STAMP_FILE.exists() else "1970-01-01T00:00:00Z"
-
-def save_stamp():
-    STAMP_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STAMP_FILE.write_text(utc_iso_now())
-
-def load_cache() -> dict[int, str]:
-    return json.loads(CACHE_FILE.read_text()) if CACHE_FILE.exists() else {}
-
-def save_cache(d: dict[int, str]):
-    CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CACHE_FILE.write_text(json.dumps(d, indent=2))
-
-def fetch_open_issues(since_iso: str | None = None) -> list[dict]:
-    issues, page = [], 1
+def fetch_issues():
+    """Fetch all open issues from the Tigerd repo."""
+    issues = []
+    page = 1
     while True:
-        url = (
-            f"https://api.github.com/repos/{REPO}/issues"
-            f"?state=open&per_page=100&page={page}"
-            + (f"&since={since_iso}" if since_iso else "")
-        )
-        chunk = requests.get(url, headers=headers).json()
-        if not chunk or (isinstance(chunk, dict) and chunk.get("message")):
+        url = f"https://api.github.com/repos/{REPO}/issues"
+        params = {
+            "state": "open",
+            "per_page": 100,
+            "page": page,
+            "sort": "created",
+            "direction": "desc",
+        }
+        resp = requests.get(url, headers=HEADERS, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+        if not data:
             break
-        issues.extend(i for i in chunk if "pull_request" not in i)
+        # Filter out pull requests
+        issues += [i for i in data if "pull_request" not in i]
         page += 1
     return issues
 
 
-# ───────── main ───────────────────────────────────────────────────────────
-last_stamp = read_stamp()
-changed    = fetch_open_issues(since_iso=last_stamp)
+def format_issues_for_claude(issues):
+    """Format issues into a prompt-friendly string."""
+    lines = []
+    for issue in issues:
+        lines.append(
+            f"#{issue['number']} | {issue['title']} | Labels: {[l['name'] for l in issue.get('labels', [])]}"
+        )
+    return "\n".join(lines)
 
-# Fallback if **nothing** changed AND we have *no* existing output
-if not changed:
-    cache_exists = CACHE_FILE.exists()
-    wiki_exists  = pathlib.Path("wiki/Issue-Categories.md").exists()
-    if not cache_exists or not wiki_exists:
-        # first run or someone wiped the wiki → build from scratch
-        print("⏩ First run or empty wiki — fetching ALL open issues.", file=sys.stderr)
-        changed = fetch_open_issues()         # full list
-    else:
-        print(f"✅ No issues updated since {last_stamp}. Nothing to classify.", file=sys.stderr)
-        save_stamp()
-        sys.exit(0)
 
-# ---------------------------------------------------------------- prompt
-issue_lines = "\n".join(f"- {i['title']} ({i['html_url']})" for i in changed)
-prompt = textwrap.dedent(f"""\
-You are an AI assistant helping triage GitHub issues into exactly 7 predefined themes.
+def triage_with_claude(issues_text):
+    """Use Claude to categorize issues."""
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-Each issue must go into exactly one of the themes below:
+    categories_list = "\n".join(f"- {c}" for c in TIGERD_CATEGORIES)
 
-{THEMES_MD}
+    prompt = f"""You are helping triage GitHub issues for Tigerd — an AI-powered IDE built on top of Void editor with an agentic AI system (tigerd-agent) powered by Cloudflare AI Gateway routing to Claude.
 
-Format your output in Markdown like:
-## 🎯 Prompt, Token, and Cost Management
-- [#123](https://github.com/org/repo/issues/123) – Title here
+Here are the open issues:
 
-Classify these issues:
-{issue_lines}
-""")
+{issues_text}
 
-resp = client.chat.completions.create(
-    model="gpt-4.1",
-    messages=[{"role": "user", "content": prompt}],
-    temperature=0.2,
-)
+Please categorize each issue into one of these categories:
+{categories_list}
 
-md = resp.choices[0].message.content
+Return a JSON object where each key is a category name and the value is a list of issue objects with "number" and "title" fields. Only include categories that have at least one issue. Example:
+{{
+  "Bug - IDE/Editor": [
+    {{"number": 12, "title": "Editor crashes on large files"}}
+  ],
+  "Feature Request - Agent": [
+    {{"number": 34, "title": "Add MCP tool support"}}
+  ]
+}}
 
-# ---------------------------------------------------------------- parse GPT
-new_map: dict[int, str] = {}
-current = None
-for ln in md.splitlines():
-    if ln.startswith("##"):
-        current = ln.lstrip("# ").strip()
-    elif ln.lstrip().startswith("- [#"):
-        try:
-            num = int(ln.split("[#")[1].split("]")[0])
-            new_map[num] = current
-        except Exception:
-            pass  # ignore malformed lines
+Return ONLY valid JSON, no explanation or markdown."""
 
-cache = load_cache()
-cache.update(new_map)
-save_cache(cache)
-save_stamp()
+    message = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=4096,
+        messages=[{"role": "user", "content": prompt}],
+    )
 
-# ---------------------------------------------------------------- rebuild wiki
-order = [
-    "🔗 LLM Integration & Provider Support",
-    "🖥 App Build & Platform Compatibility",
-    "🎯 Prompt, Token, and Cost Management",
-    "🧩 Editor UX & Interaction Design",
-    "🤖 Agent & Automation Features",
-    "⚙️ System Config & Environment Setup",
-    "🗃 Meta: Feature Comparison, Structure, and Naming",
-]
+    return message.content[0].text
 
-sections: dict[str, list[int]] = {t: [] for t in order}
 
-# ── fetch ALL current open issues once  (PRs filtered out) ────────────────
-title_map: dict[int, tuple[str, str]] = {}
-open_now: set[int] = set()
+def generate_markdown(categorized, total_issues):
+    """Generate the wiki markdown from categorized issues."""
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
-page = 1
-while True:
-    batch = fetch_open_issues(since_iso=None) if page == 1 else []
-    if not batch:
-        break
-    for it in batch:
-        num = it["number"]
-        title_map[num] = (it["title"], it["html_url"])
-        open_now.add(num)
-    page += 1
+    lines = [
+        "# Tigerd Issue Categories",
+        "",
+        f"> Auto-generated by Claude · Last updated: {now} · Total open issues: {total_issues}",
+        "",
+        "---",
+        "",
+    ]
 
-# 🧹 drop any cached IDs that are no longer open issues (e.g., became a PR or were closed)
-for stale in set(cache) - open_now:
-    del cache[stale]
-save_cache(cache)            # persist cleaned cache
+    for category, issues in categorized.items():
+        if not issues:
+            continue
+        lines.append(f"## {category} ({len(issues)})")
+        lines.append("")
+        for issue in issues:
+            num = issue.get("number", "?")
+            title = issue.get("title", "Untitled")
+            lines.append(f"- [#{num} {title}](https://github.com/{REPO}/issues/{num})")
+        lines.append("")
 
-# build sections from cleaned cache
-for num, theme in cache.items():
-    if theme in sections:          # extra safety
-        sections[theme].append(num)
+    lines += [
+        "---",
+        "",
+        f"*Generated automatically every 6 hours using [Claude](https://anthropic.com) · [View all issues](https://github.com/{REPO}/issues)*",
+    ]
 
-# ---------------------------------------------------------------- print roadmap
-for theme in order:
-    issues = sections[theme]
-    if issues:
-        print(f"## {theme}")
-        for n in sorted(issues):
-            title, url = title_map.get(n, ("(missing)", f"https://github.com/{REPO}/issues/{n}"))
-            print(f"- [#{n}]({url}) – {title}")
-        print()
+    return "\n".join(lines)
+
+
+def main():
+    # Fetch issues
+    issues = fetch_issues()
+    if not issues:
+        print("# Tigerd Issue Categories\n\nNo open issues found.")
+        return
+
+    # Format for Claude
+    issues_text = format_issues_for_claude(issues)
+
+    # Triage with Claude
+    raw_json = triage_with_claude(issues_text)
+
+    # Parse response
+    try:
+        categorized = json.loads(raw_json)
+    except json.JSONDecodeError:
+        # Try to extract JSON if Claude added any extra text
+        import re
+        match = re.search(r"\{.*\}", raw_json, re.DOTALL)
+        if match:
+            categorized = json.loads(match.group())
+        else:
+            print("# Tigerd Issue Categories\n\nError parsing Claude response.")
+            return
+
+    # Generate markdown
+    markdown = generate_markdown(categorized, len(issues))
+    print(markdown)
+
+
+if __name__ == "__main__":
+    main()
