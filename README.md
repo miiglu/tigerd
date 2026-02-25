@@ -11,7 +11,7 @@
 
 Tigerd is an AI coding IDE built for developers worldwide.
 
-Use AI agents on your codebase, checkpoint and visualize changes, and bring any model or host locally. Tigerd routes messages through a managed backend without retaining your code.
+Use AI agents on your codebase, checkpoint and visualize changes, and bring any model. Tigerd routes messages through a managed backend without retaining your code.
 
 This repo contains the full distribution source code for Tigerd. If you're new, welcome!
 
