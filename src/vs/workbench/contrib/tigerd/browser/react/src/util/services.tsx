@@ -38,6 +38,7 @@ import { IAccessibilityService } from '../../../../../../../platform/accessibili
 import { ILanguageConfigurationService } from '../../../../../../../editor/common/languages/languageConfigurationRegistry.js'
 import { ILanguageFeaturesService } from '../../../../../../../editor/common/services/languageFeatures.js'
 import { ILanguageDetectionService } from '../../../../../../services/languageDetection/common/languageDetectionWorkerService.js'
+import { IMainProcessService } from '../../../../../../../platform/ipc/common/mainProcessService.js';
 import { IKeybindingService } from '../../../../../../../platform/keybinding/common/keybinding.js'
 import { IEnvironmentService } from '../../../../../../../platform/environment/common/environment.js'
 import { IConfigurationService } from '../../../../../../../platform/configuration/common/configuration.js'
@@ -233,6 +234,7 @@ const getReactAccessor = (accessor: ServicesAccessor) => {
 		IExtensionManagementService: accessor.get(IExtensionManagementService),
 		IExtensionTransferService: accessor.get(IExtensionTransferService),
 		IMCPService: accessor.get(IMCPService),
+		IMainProcessService: accessor.get(IMainProcessService),
 
 		IStorageService: accessor.get(IStorageService),
 
@@ -302,6 +304,7 @@ export const useChatThreadsStreamState = (threadId: string) => {
 		ss(chatThreadsStreamState[threadId])
 		const listener = (threadId_: string) => {
 			if (threadId_ !== threadId) return
+			console.log('[React] Stream state listener triggered, threadId:', threadId, 'state:', chatThreadsStreamState[threadId]?.isRunning);
 			ss(chatThreadsStreamState[threadId])
 		}
 		chatThreadsStreamStateListeners.add(listener)
@@ -431,4 +434,88 @@ export const useIsOptedOut = () => {
 	}, [storageService, getVal])
 
 	return s
+}
+
+// Auth loading state - tracks if login is in progress
+let _authLoading = false
+const authLoadingStateListeners = new Set<((loading: boolean) => void)>()
+
+export const useAuthLoading = () => {
+	const [loading, setLoading] = useState(_authLoading)
+
+	useEffect(() => {
+		const listener = (isLoading: boolean) => setLoading(isLoading)
+		authLoadingStateListeners.add(listener)
+		return () => { authLoadingStateListeners.delete(listener) }
+	}, [])
+
+	return loading
+}
+
+export const setAuthLoading = (loading: boolean) => {
+	_authLoading = loading
+	authLoadingStateListeners.forEach(l => l(loading))
+}
+
+export const useLogin = () => {
+	const accessor = useAccessor()
+	const tigerdSettingsService = accessor.get('ITigerdSettingsService')
+	const nativeHostService = accessor.get('INativeHostService')
+
+	const login = useCallback(async () => {
+		// Set loading state
+		setAuthLoading(true)
+		
+		const loginUrl = tigerdSettingsService.getLoginUrl()
+		// Open in system default browser
+		await nativeHostService.openExternal(loginUrl)
+		
+		// Note: Loading will be cleared when main process sends auth result
+		// But also clear after a timeout in case user closes browser without logging in
+		setTimeout(() => setAuthLoading(false), 60000) // 1 minute timeout
+	}, [tigerdSettingsService, nativeHostService])
+
+	return login
+}
+
+export const useSubmitToken = () => {
+	const accessor = useAccessor()
+	const mainProcessService = accessor.get('IMainProcessService')
+	const tigerdSettingsService = accessor.get('ITigerdSettingsService')
+
+	const submitToken = useCallback(async (token: string) => {
+		if (!token) return { success: false, error: 'No token provided' };
+
+		setAuthLoading(true);
+		try {
+			const channel = mainProcessService.getChannel('tigerd-agent');
+			const result = await channel.call('submitToken', { token });
+			
+			if (result.success) {
+				// Token is now saved and agent restarted
+				// Clear loading state
+				setAuthLoading(false);
+				return { success: true, email: result.email };
+			} else {
+				setAuthLoading(false);
+				return { success: false, error: result.error };
+			}
+		} catch (error) {
+			setAuthLoading(false);
+			return { success: false, error: String(error) };
+		}
+	}, [mainProcessService, tigerdSettingsService])
+
+	return submitToken
+}
+
+export const useLogout = () => {
+	const accessor = useAccessor()
+	const tigerdSettingsService = accessor.get('ITigerdSettingsService')
+
+	const logout = useCallback(async () => {
+		await tigerdSettingsService.logout()
+	}, [tigerdSettingsService])
+
+	return logout
 }

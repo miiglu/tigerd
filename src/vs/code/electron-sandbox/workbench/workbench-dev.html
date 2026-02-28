@@ -34,11 +34,13 @@
 					'self'
 					'unsafe-inline'
 				;
-				connect-src
-					'self'
-					https:
-					ws:
-				;
+			connect-src
+				'self'
+				https:
+				ws:
+				http://localhost:*
+				http://127.0.0.1:*
+			;
 				font-src
 					'self'
 					vscode-remote-resource:

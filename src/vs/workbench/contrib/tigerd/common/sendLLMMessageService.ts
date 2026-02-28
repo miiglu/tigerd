@@ -9,7 +9,7 @@
  *--------------------------------------------------------------------------------------*/
 
 
-import { EventLLMMessageOnTextParams, EventLLMMessageOnErrorParams, EventLLMMessageOnFinalMessageParams, ServiceSendLLMMessageParams, MainSendLLMMessageParams, MainLLMMessageAbortParams, ServiceModelListParams, EventModelListOnSuccessParams, EventModelListOnErrorParams, MainModelListParams, OllamaModelResponse, OpenaiCompatibleModelResponse, } from './sendLLMMessageTypes.js';
+import { EventLLMMessageOnTextParams, EventLLMMessageOnErrorParams, EventLLMMessageOnFinalMessageParams, EventLLMMessageOnQuestionParams, EventLLMMessageOnPermissionParams, ServiceSendLLMMessageParams, MainSendLLMMessageParams, MainLLMMessageAbortParams, ServiceModelListParams, EventModelListOnSuccessParams, EventModelListOnErrorParams, MainModelListParams, OllamaModelResponse, OpenaiCompatibleModelResponse, } from './sendLLMMessageTypes.js';
 
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
@@ -44,6 +44,8 @@ export class LLMMessageService extends Disposable implements ILLMMessageService 
 		onText: {} as { [eventId: string]: ((params: EventLLMMessageOnTextParams) => void) },
 		onFinalMessage: {} as { [eventId: string]: ((params: EventLLMMessageOnFinalMessageParams) => void) },
 		onError: {} as { [eventId: string]: ((params: EventLLMMessageOnErrorParams) => void) },
+		onQuestion: {} as { [eventId: string]: ((params: EventLLMMessageOnQuestionParams) => void) },
+		onPermission: {} as { [eventId: string]: ((params: EventLLMMessageOnPermissionParams) => void) },
 		onAbort: {} as { [eventId: string]: (() => void) }, // NOT sent over the channel, result is instant when we call .abort()
 	}
 
@@ -79,16 +81,27 @@ export class LLMMessageService extends Disposable implements ILLMMessageService 
 		// .listen sets up an IPC channel and takes a few ms, so we set up listeners immediately and add hooks to them instead
 		// llm
 		this._register((this.channel.listen('onText_sendLLMMessage') satisfies Event<EventLLMMessageOnTextParams>)(e => {
+			console.log('[Renderer] onText received, requestId:', e.requestId, 'threadId:', e.threadId, 'fullText length:', e.fullText?.length);
 			this.llmMessageHooks.onText[e.requestId]?.(e)
 		}))
 		this._register((this.channel.listen('onFinalMessage_sendLLMMessage') satisfies Event<EventLLMMessageOnFinalMessageParams>)(e => {
+			console.log('[Renderer] onFinalMessage received, requestId:', e.requestId, 'threadId:', e.threadId);
 			this.llmMessageHooks.onFinalMessage[e.requestId]?.(e);
 			this._clearChannelHooks(e.requestId)
 		}))
 		this._register((this.channel.listen('onError_sendLLMMessage') satisfies Event<EventLLMMessageOnErrorParams>)(e => {
+			console.log('[Renderer] onError received, requestId:', e.requestId, 'threadId:', e.threadId);
 			this.llmMessageHooks.onError[e.requestId]?.(e);
 			this._clearChannelHooks(e.requestId);
 			console.error('Error in LLMMessageService:', JSON.stringify(e))
+		}))
+		this._register((this.channel.listen('onQuestion_sendLLMMessage') satisfies Event<EventLLMMessageOnQuestionParams>)(e => {
+			console.log('[Renderer] onQuestion received, requestId:', e.requestId, 'questionId:', e.requestId);
+			this.llmMessageHooks.onQuestion[e.requestId]?.(e);
+		}))
+		this._register((this.channel.listen('onPermission_sendLLMMessage') satisfies Event<EventLLMMessageOnPermissionParams>)(e => {
+			console.log('[Renderer] onPermission received, requestId:', e.requestId);
+			this.llmMessageHooks.onPermission[e.requestId]?.(e);
 		}))
 		// .list()
 		this._register((this.channel.listen('onSuccess_list_ollama') satisfies Event<EventModelListOnSuccessParams<OllamaModelResponse>>)(e => {
@@ -107,7 +120,7 @@ export class LLMMessageService extends Disposable implements ILLMMessageService 
 	}
 
 	sendLLMMessage(params: ServiceSendLLMMessageParams) {
-		const { onText, onFinalMessage, onError, onAbort, modelSelection, ...proxyParams } = params;
+		const { onText, onFinalMessage, onError, onQuestion, onPermission, onAbort, modelSelection, ...proxyParams } = params;
 
 		// throw an error if no model/provider selected (this should usually never be reached, the UI should check this first, but might happen in cases like Apply where we haven't built much UI/checks yet, good practice to have check logic on backend)
 		if (modelSelection === null) {
@@ -122,7 +135,7 @@ export class LLMMessageService extends Disposable implements ILLMMessageService 
 			return null
 		}
 
-		const { settingsOfProvider, } = this.tigerdSettingsService.state
+		const { settingsOfProvider, authToken, isAuthenticated } = this.tigerdSettingsService.state
 
 		const mcpTools = this.mcpService.getMCPTools()
 
@@ -131,6 +144,12 @@ export class LLMMessageService extends Disposable implements ILLMMessageService 
 		this.llmMessageHooks.onText[requestId] = onText
 		this.llmMessageHooks.onFinalMessage[requestId] = onFinalMessage
 		this.llmMessageHooks.onError[requestId] = onError
+		if (onQuestion) {
+			this.llmMessageHooks.onQuestion[requestId] = onQuestion
+		}
+		if (onPermission) {
+			this.llmMessageHooks.onPermission[requestId] = onPermission
+		}
 		this.llmMessageHooks.onAbort[requestId] = onAbort // used internally only
 
 		// params will be stripped of all its functions over the IPC channel
@@ -140,6 +159,8 @@ export class LLMMessageService extends Disposable implements ILLMMessageService 
 			settingsOfProvider,
 			modelSelection,
 			mcpTools,
+			authToken,
+			isAuthenticated,
 		} satisfies MainSendLLMMessageParams);
 
 		return requestId

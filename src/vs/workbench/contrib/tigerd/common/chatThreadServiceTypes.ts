@@ -11,7 +11,7 @@
 
 import { URI } from '../../../../base/common/uri.js';
 import { TigerdFileSnapshot } from './editCodeServiceTypes.js';
-import { AnthropicReasoning, RawToolParamsObj } from './sendLLMMessageTypes.js';
+import { AnthropicReasoning, Part, RawToolParamsObj } from './sendLLMMessageTypes.js';
 import { ToolCallParams, ToolName, ToolResult } from './toolsServiceTypes.js';
 
 export type ToolMessage<T extends ToolName> = {
@@ -69,6 +69,7 @@ export type ChatMessage =
 		reasoning: string; // reasoning from the LLM, used for step-by-step thinking
 
 		anthropicReasoning: AnthropicReasoning[] | null; // anthropic reasoning
+		parts?: Part[]; // opencode parts for sequential rendering
 	}
 	| ToolMessage<ToolName>
 	| DecorativeCanceledTool

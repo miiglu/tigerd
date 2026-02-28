@@ -35,8 +35,9 @@ import { CopyButton, EditToolAcceptRejectButtonsHTML, IconShell1, JumpToFileButt
 import { IsRunningType } from '../../../chatThreadService.js';
 import { acceptAllBg, acceptBorder, buttonFontSize, buttonTextColor, rejectAllBg, rejectBg, rejectBorder } from '../../../../common/helpers/colors.js';
 import { builtinToolNames, isABuiltinToolName, MAX_FILE_CHARS_PAGE, MAX_TERMINAL_INACTIVE_TIME } from '../../../../common/prompt/prompts.js';
-import { RawToolCallObj } from '../../../../common/sendLLMMessageTypes.js';
+import { RawToolCallObj, Part } from '../../../../common/sendLLMMessageTypes.js';
 import ErrorBoundary from './ErrorBoundary.js';
+import { ToolRenderer } from './ToolRenderers.js';
 import { ToolApprovalTypeSwitch } from '../tigerd-settings-tsx/Settings.js';
 
 import { persistentTerminalNameOfId } from '../../../terminalToolService.js';
@@ -1337,45 +1338,130 @@ const AssistantMessageComponent = ({ chatMessage, isCheckpointGhost, isCommitted
 	const isDoneReasoning = !!chatMessage.displayContent
 	const thread = chatThreadsService.getCurrentThread()
 
-
+	const parts = chatMessage.parts || []
+	
+	const usePartsRendering = parts.length > 0
+	
 	const chatMessageLocation: ChatMessageLocation = {
 		threadId: thread.id,
 		messageIdx: messageIdx,
 	}
 
-	const isEmpty = !chatMessage.displayContent && !chatMessage.reasoning
+	const isEmpty = !chatMessage.displayContent && !chatMessage.reasoning && parts.length === 0
 	if (isEmpty) return null
 
-	return <>
-		{/* reasoning token */}
-		{hasReasoning &&
-			<div className={`${isCheckpointGhost ? 'opacity-50' : ''}`}>
-				<ReasoningWrapper isDoneReasoning={isDoneReasoning} isStreaming={!isCommitted}>
-					<SmallProseWrapper>
-						<ChatMarkdownRender
-							string={reasoningStr}
-							chatMessageLocation={chatMessageLocation}
-							isApplyEnabled={false}
-							isLinkDetectionEnabled={true}
+	// Sequential rendering - render parts in order as they appear
+	const renderPart = (part: any, idx: number, arr: any[]) => {
+		// Use index-based key for reasoning to allow real-time text updates
+		const key = `${part.type}-${idx}`;
+		
+		switch (part.type) {
+			case 'reasoning':
+				return (
+					<div key={key} className={`${isCheckpointGhost ? 'opacity-50' : ''}`}>
+						<ReasoningWrapper isDoneReasoning={isDoneReasoning} isStreaming={!isCommitted}>
+							<SmallProseWrapper>
+								<ChatMarkdownRender
+									string={part.text?.trim() || ''}
+									chatMessageLocation={chatMessageLocation}
+									isApplyEnabled={false}
+									isLinkDetectionEnabled={true}
+								/>
+							</SmallProseWrapper>
+						</ReasoningWrapper>
+					</div>
+				);
+			
+			case 'text':
+				return (
+					<div key={key} className={`${isCheckpointGhost ? 'opacity-50' : ''}`}>
+						<ProseWrapper>
+							<ChatMarkdownRender
+								string={part.text || ''}
+								chatMessageLocation={chatMessageLocation}
+								isApplyEnabled={true}
+								isLinkDetectionEnabled={true}
+							/>
+						</ProseWrapper>
+					</div>
+				);
+			
+			case 'tool':
+			return (
+					<div key={key} className={`${isCheckpointGhost ? 'opacity-50' : ''} mt-2`}>
+						<ToolRenderer
+							toolName={part.tool}
+							toolState={part.state}
+							toolId={part.callID}
+							rawParams={part.state?.params || part.metadata?.params || {}}
+							isDone={part.state?.status === 'completed'}
+							commandService={accessor.get('ICommandService')}
+							threadId={thread.id}
+							chatThreadsService={chatThreadsService}
 						/>
-					</SmallProseWrapper>
-				</ReasoningWrapper>
-			</div>
+					</div>
+				);
+			
+			case 'file':
+				const fileContent = part.source?.text?.value || '';
+				const fileName = part.filename || part.source?.path || `File ${idx + 1}`;
+				return (
+					<div key={key} className={`${isCheckpointGhost ? 'opacity-50' : ''} mt-2`}>
+						<div className="border border-void-border-3 rounded overflow-hidden bg-void-bg-3">
+							<div className="flex items-center gap-2 px-3 py-1 bg-void-bg-2 border-b border-void-border-3">
+								<FileIcon className="w-4 h-4 text-amber-500" />
+								<span className="text-sm text-void-fg-3 font-mono">{fileName}</span>
+							</div>
+							<div className="px-3 py-2 max-h-64 overflow-auto">
+								<pre className="text-xs text-void-fg-3 font-mono whitespace-pre-wrap">{fileContent}</pre>
+							</div>
+						</div>
+					</div>
+				);
+			
+			default:
+				return null;
 		}
+	};
 
-		{/* assistant message */}
-		{chatMessage.displayContent &&
-			<div className={`${isCheckpointGhost ? 'opacity-50' : ''}`}>
-				<ProseWrapper>
-					<ChatMarkdownRender
-						string={chatMessage.displayContent || ''}
-						chatMessageLocation={chatMessageLocation}
-						isApplyEnabled={true}
-						isLinkDetectionEnabled={true}
-					/>
-				</ProseWrapper>
-			</div>
-		}
+	return <>
+		{/* Use parts-based sequential rendering if available (for opencode messages) */}
+		{usePartsRendering ? (
+			<>
+				{parts.map((part, idx) => renderPart(part, idx, parts))}
+			</>
+		) : (
+			<>
+				{/* Legacy rendering - use reasoning field and displayContent */}
+				{hasReasoning &&
+					<div className={`${isCheckpointGhost ? 'opacity-50' : ''}`}>
+						<ReasoningWrapper isDoneReasoning={isDoneReasoning} isStreaming={!isCommitted}>
+							<SmallProseWrapper>
+								<ChatMarkdownRender
+									string={reasoningStr}
+									chatMessageLocation={chatMessageLocation}
+									isApplyEnabled={false}
+									isLinkDetectionEnabled={true}
+								/>
+							</SmallProseWrapper>
+						</ReasoningWrapper>
+					</div>
+				}
+
+				{chatMessage.displayContent &&
+					<div className={`${isCheckpointGhost ? 'opacity-50' : ''}`}>
+						<ProseWrapper>
+							<ChatMarkdownRender
+								string={chatMessage.displayContent || ''}
+								chatMessageLocation={chatMessageLocation}
+								isApplyEnabled={true}
+								isLinkDetectionEnabled={true}
+							/>
+						</ProseWrapper>
+					</div>
+				}
+			</>
+		)}
 	</>
 
 }
@@ -1387,9 +1473,9 @@ const ReasoningWrapper = ({ isDoneReasoning, isStreaming, children }: { isDoneRe
 	useEffect(() => {
 		if (!isWriting) setIsOpen(false) // if just finished reasoning, close
 	}, [isWriting])
-	return <ToolHeaderWrapper title='Reasoning' desc1={isWriting ? <IconLoading /> : ''} isOpen={isOpen} onClick={() => setIsOpen(v => !v)}>
+	return <ToolHeaderWrapper title='Reasoning' desc1={isWriting ? <IconLoading /> : ''} isOpen={isOpen} onClick={() => setIsOpen(v => !v)} className='!bg-transparent'>
 		<ToolChildrenWrapper>
-			<div className='!select-text cursor-auto'>
+			<div className='!select-text cursor-auto italic text-void-fg-3'>
 				{children}
 			</div>
 		</ToolChildrenWrapper>
@@ -2908,7 +2994,10 @@ export const SidebarChat = () => {
 	const currThreadStreamState = useChatThreadsStreamState(chatThreadsState.currentThreadId)
 	const isRunning = currThreadStreamState?.isRunning
 	const latestError = currThreadStreamState?.error
-	const { displayContentSoFar, toolCallSoFar, reasoningSoFar } = currThreadStreamState?.llmInfo ?? {}
+	const { displayContentSoFar, toolCallSoFar, reasoningSoFar, parts: streamParts } = currThreadStreamState?.llmInfo ?? {}
+
+	// Check if there's a pending question that needs answering (question is a tool type with tool: 'question')
+	const hasPendingQuestion = streamParts?.some((part: any) => part.type === 'tool' && part.tool === 'question')
 
 	// this is just if it's currently being generated, NOT if it's currently running
 	const toolIsGenerating = toolCallSoFar && !toolCallSoFar.isDone // show loading for slow tools (right now just edit)
@@ -2919,7 +3008,7 @@ export const SidebarChat = () => {
 	const initVal = ''
 	const [instructionsAreEmpty, setInstructionsAreEmpty] = useState(!initVal)
 
-	const isDisabled = instructionsAreEmpty || !!isFeatureNameDisabled('Chat', settingsState)
+	const isDisabled = instructionsAreEmpty || !!isFeatureNameDisabled('Chat', settingsState) || hasPendingQuestion
 
 	const sidebarRef = useRef<HTMLDivElement>(null)
 	const scrollContainerRef = useRef<HTMLDivElement | null>(null)
@@ -2989,7 +3078,7 @@ export const SidebarChat = () => {
 	}, [previousMessages, threadId, currCheckpointIdx, isRunning])
 
 	const streamingChatIdx = previousMessagesHTML.length
-	const currStreamingMessageHTML = reasoningSoFar || displayContentSoFar || isRunning ?
+	const currStreamingMessageHTML = reasoningSoFar || displayContentSoFar || isRunning || (streamParts && streamParts.length > 0) ?
 		<ChatBubble
 			key={'curr-streaming-msg'}
 			currCheckpointIdx={currCheckpointIdx}
@@ -2998,6 +3087,7 @@ export const SidebarChat = () => {
 				displayContent: displayContentSoFar ?? '',
 				reasoning: reasoningSoFar ?? '',
 				anthropicReasoning: null,
+				parts: streamParts,
 			}}
 			messageIdx={streamingChatIdx}
 			isCommitted={false}

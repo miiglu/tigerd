@@ -104,6 +104,10 @@ protocol.registerSchemesAsPrivileged([
 	{
 		scheme: 'vscode-file',
 		privileges: { secure: true, standard: true, supportFetchAPI: true, corsEnabled: true, codeCache: true }
+	},
+	{
+		scheme: 'tigerd',
+		privileges: { standard: false, secure: true, supportFetchAPI: false, corsEnabled: false }
 	}
 ]);
 

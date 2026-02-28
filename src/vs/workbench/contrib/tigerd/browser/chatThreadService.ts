@@ -18,7 +18,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { ILLMMessageService } from '../common/sendLLMMessageService.js';
 import { chat_userMessageContent, isABuiltinToolName } from '../common/prompt/prompts.js';
-import { AnthropicReasoning, getErrorMessage, RawToolCallObj, RawToolParamsObj } from '../common/sendLLMMessageTypes.js';
+import { AnthropicReasoning, getErrorMessage, RawToolCallObj, RawToolParamsObj, Part, FileDiff } from '../common/sendLLMMessageTypes.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { FeatureName, ModelSelection, ModelSelectionOptions } from '../common/tigerdSettingsTypes.js';
 import { ITigerdSettingsService } from '../common/tigerdSettingsService.js';
@@ -45,6 +45,8 @@ import { IDirectoryStrService } from '../common/directoryStrService.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IMCPService } from '../common/mcpService.js';
 import { RawMCPToolCall } from '../common/mcpServiceTypes.js';
+import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
+// import { abortAgentSession, createAgentSession } from '../electron-main/llmMessage/sendLLMMessage.js';
 
 
 // related to retrying when LLM message has error
@@ -125,6 +127,9 @@ export type ThreadType = {
 	messages: ChatMessage[];
 	filesWithUserChanges: Set<string>;
 
+	// Agent session ID for this thread
+	sessionId?: string;
+
 	// this doesn't need to go in a state object, but feels right
 	state: {
 		currCheckpointIdx: number | null; // the latest checkpoint we're at (null if not at a particular checkpoint, like if the chat is streaming, or chat just finished and we haven't clicked on a checkpt)
@@ -173,16 +178,23 @@ export type ThreadStreamState = {
 		llmInfo?: undefined;
 		toolInfo?: undefined;
 		interrupt?: undefined;
+		questionRequestId?: string;
+		permissionRequestId?: string;
 	} | { // an assistant message is being written
 		isRunning: 'LLM';
 		error?: undefined;
 		llmInfo: {
 			displayContentSoFar: string;
 			reasoningSoFar: string;
+			thinkingSoFar: string;
 			toolCallSoFar: RawToolCallObj | null;
+			parts?: Part[]; // All parts for sequential rendering (like opencode)
+			diffs?: FileDiff[]; // Real-time file diffs from opencode
 		};
 		toolInfo?: undefined;
 		interrupt: Promise<() => void>; // calling this should have no effect on state - would be too confusing. it just cancels the tool
+		questionRequestId?: string;
+		permissionRequestId?: string;
 	} | { // a tool is being run
 		isRunning: 'tool';
 		error?: undefined;
@@ -196,18 +208,24 @@ export type ThreadStreamState = {
 			mcpServerName: string | undefined;
 		};
 		interrupt: Promise<() => void>;
+		questionRequestId?: string;
+		permissionRequestId?: string;
 	} | {
 		isRunning: 'awaiting_user';
 		error?: undefined;
 		llmInfo?: undefined;
 		toolInfo?: undefined;
 		interrupt?: undefined;
+		questionRequestId?: string;
+		permissionRequestId?: string;
 	} | {
 		isRunning: 'idle';
 		error?: undefined;
 		llmInfo?: undefined;
 		toolInfo?: undefined;
 		interrupt: 'not_needed' | Promise<() => void>; // calling this should have no effect on state - would be too confusing. it just cancels the tool
+		questionRequestId?: string;
+		permissionRequestId?: string;
 	}
 }
 
@@ -292,6 +310,13 @@ export interface IChatThreadService {
 	approveLatestToolRequest(threadId: string): void;
 	rejectLatestToolRequest(threadId: string): void;
 
+	// question reply/reject
+	replyToQuestion(threadId: string, answers: { questionID: string, answer: string }[]): Promise<boolean>;
+	rejectQuestion(threadId: string): Promise<boolean>;
+
+	// permission respond
+	respondToPermission(threadId: string, reply: 'once' | 'always' | 'reject'): Promise<boolean>;
+
 	// jump to history
 	jumpToCheckpointBeforeMessageIdx(opts: { threadId: string, messageIdx: number, jumpToUserModified: boolean }): void;
 
@@ -333,11 +358,17 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		@IDirectoryStrService private readonly _directoryStringService: IDirectoryStrService,
 		@IFileService private readonly _fileService: IFileService,
 		@IMCPService private readonly _mcpService: IMCPService,
+		@IMainProcessService private readonly _mainProcessService: IMainProcessService,
 	) {
 		super()
 		this.state = { allThreads: {}, currentThreadId: null as unknown as string } // default state
 
 		const readThreads = this._readAllThreads() || {}
+
+		// Log loaded threads and their session IDs
+		for (const [tid, thread] of Object.entries(readThreads)) {
+			console.log('[Tigerd] Loaded thread:', tid, 'sessionId:', thread?.sessionId, 'messages:', thread?.messages?.length);
+		}
 
 		const allThreads = readThreads
 		this.state = {
@@ -486,6 +517,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 
 	private _setStreamState(threadId: string, state: ThreadStreamState[string]) {
+		console.log('[ChatThreadService] _setStreamState called, threadId:', threadId, 'isRunning:', state?.isRunning, 'content length:', state?.llmInfo?.displayContentSoFar?.length);
 		this.streamState[threadId] = state
 		this._onDidChangeStreamState.fire({ threadId })
 	}
@@ -556,6 +588,95 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		this._setStreamState(threadId, undefined)
 	}
 
+	async replyToQuestion(threadId: string, answers: { questionID: string, answer: string }[]): Promise<boolean> {
+		try {
+			const channel = this._mainProcessService.getChannel('tigerd-agent');
+
+			// Get the question request ID from stream state
+			const questionRequestId = this.streamState[threadId]?.questionRequestId;
+			if (!questionRequestId) {
+				console.error('[Tigerd] No questionRequestId in stream state for thread:', threadId);
+				return false;
+			}
+
+			const result = await channel.call('replyToQuestion', {
+				requestId: questionRequestId,
+				answers,
+			}) as boolean;
+
+			if (result) {
+				console.log('[Tigerd] Question answered successfully');
+				// Clear the question request ID from stream state
+				if (this.streamState[threadId]) {
+					this.streamState[threadId].questionRequestId = undefined;
+				}
+			}
+			return result;
+		} catch (error) {
+			console.error('[Tigerd] Error replying to question:', error);
+			return false;
+		}
+	}
+
+	async rejectQuestion(threadId: string): Promise<boolean> {
+		try {
+			const channel = this._mainProcessService.getChannel('tigerd-agent');
+
+			// Get the question request ID from stream state
+			const questionRequestId = this.streamState[threadId]?.questionRequestId;
+			if (!questionRequestId) {
+				console.error('[Tigerd] No questionRequestId in stream state for thread:', threadId);
+				return false;
+			}
+
+			const result = await channel.call('rejectQuestion', {
+				requestId: questionRequestId,
+			}) as boolean;
+
+			if (result) {
+				console.log('[Tigerd] Question rejected successfully');
+				// Clear the question request ID from stream state
+				if (this.streamState[threadId]) {
+					this.streamState[threadId].questionRequestId = undefined;
+				}
+			}
+			return result;
+		} catch (error) {
+			console.error('[Tigerd] Error rejecting question:', error);
+			return false;
+		}
+	}
+
+	async respondToPermission(threadId: string, reply: 'once' | 'always' | 'reject'): Promise<boolean> {
+		try {
+			const channel = this._mainProcessService.getChannel('tigerd-agent');
+
+			// Get the permission request ID from stream state
+			const permissionRequestId = this.streamState[threadId]?.permissionRequestId;
+			if (!permissionRequestId) {
+				console.error('[Tigerd] No permissionRequestId in stream state for thread:', threadId);
+				return false;
+			}
+
+			const result = await channel.call('respondToPermission', {
+				requestId: permissionRequestId,
+				reply,
+			}) as boolean;
+
+			if (result) {
+				console.log('[Tigerd] Permission responded:', reply);
+				// Clear the permission request ID from stream state
+				if (this.streamState[threadId]) {
+					this.streamState[threadId].permissionRequestId = undefined;
+				}
+			}
+			return result;
+		} catch (error) {
+			console.error('[Tigerd] Error responding to permission:', error);
+			return false;
+		}
+	}
+
 	private _computeMCPServerOfToolName = (toolName: string) => {
 		return this._mcpService.getMCPTools()?.find(t => t.name === toolName)?.mcpServerName
 	}
@@ -566,8 +687,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 		// add assistant message
 		if (this.streamState[threadId]?.isRunning === 'LLM') {
-			const { displayContentSoFar, reasoningSoFar, toolCallSoFar } = this.streamState[threadId].llmInfo
-			this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar, reasoning: reasoningSoFar, anthropicReasoning: null })
+			const { displayContentSoFar, reasoningSoFar, toolCallSoFar, parts } = this.streamState[threadId].llmInfo
+			this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar, reasoning: reasoningSoFar, anthropicReasoning: null, parts })
 			if (toolCallSoFar) this._addMessageToThread(threadId, { role: 'interrupted_streaming_tool', name: toolCallSoFar.name, mcpServerName: this._computeMCPServerOfToolName(toolCallSoFar.name) })
 		}
 		// add tool that's running
@@ -591,6 +712,18 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		if (typeof interrupt === 'function')
 			interrupt()
 
+		// Abort the tigerd-agent session using the thread's sessionId via IPC
+		const threadSessionId = thread.sessionId;
+		if (threadSessionId) {
+			const workspaceFolder = this._workspaceContextService.getWorkspace().folders[0]?.uri.fsPath;
+			try {
+				const channel = this._mainProcessService.getChannel('tigerd-agent');
+				await channel.call('abortAgentSession', { sessionId: threadSessionId, workingDir: workspaceFolder || process.cwd() });
+				console.log('[Tigerd] Aborted session:', threadSessionId);
+			} catch (error) {
+				console.error('[Tigerd] Error aborting session:', error);
+			}
+		}
 
 		this._setStreamState(threadId, undefined)
 	}
@@ -808,6 +941,22 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				let resMessageIsDonePromise: (res: ResTypes) => void // resolves when user approves this tool use (or if tool doesn't require approval)
 				const messageIsDonePromise = new Promise<ResTypes>((res, rej) => { resMessageIsDonePromise = res })
 
+				// Get thread's session ID if available
+				// Note: Session management is now handled internally by tigerd-agent
+				// Each message will reuse the same agent session, or create a new one as needed
+				let thread = this.state.allThreads[threadId];
+				let sessionId = thread?.sessionId;
+
+				// If no session exists, create one synchronously before sending message
+				if (!sessionId) {
+					console.log('[Tigerd] No session found for thread, creating session before sending message...');
+					await this._createSessionForThread(threadId);
+					thread = this.state.allThreads[threadId];
+					sessionId = thread?.sessionId;
+				}
+
+				console.log('[Tigerd] Sending message with sessionId:', sessionId, 'threadId:', threadId);
+
 				const llmCancelToken = this._llmMessageService.sendLLMMessage({
 					messagesType: 'chatMessages',
 					chatMode,
@@ -816,9 +965,54 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					modelSelectionOptions,
 					overridesOfModel,
 					logging: { loggingName: `Chat - ${chatMode}`, loggingExtras: { threadId, nMessagesSent, chatMode } },
-					separateSystemMessage: separateSystemMessage,
-					onText: ({ fullText, fullReasoning, toolCall }) => {
-						this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: fullText, reasoningSoFar: fullReasoning, toolCallSoFar: toolCall ?? null }, interrupt: Promise.resolve(() => { if (llmCancelToken) this._llmMessageService.abort(llmCancelToken) }) })
+					separateSystemMessage,
+					workspaceFolder: this._workspaceContextService.getWorkspace().folders[0]?.uri.fsPath,
+					sessionId,
+					threadId,
+					onText: ({ fullText, fullReasoning, toolCall, parts }) => {
+						const existingDiffs = this.streamState[threadId]?.llmInfo?.diffs || [];
+						this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: fullText, reasoningSoFar: fullReasoning, thinkingSoFar: '', toolCallSoFar: toolCall ?? null, parts, diffs: existingDiffs }, interrupt: Promise.resolve(() => { if (llmCancelToken) this._llmMessageService.abort(llmCancelToken) }) })
+					},
+					onDiff: ({ diffs }: { diffs: FileDiff[] }) => {
+						// Merge new diffs with existing ones (avoid duplicates by file path)
+						const existingDiffs = this.streamState[threadId]?.llmInfo?.diffs || [];
+						const newDiffs = [...existingDiffs];
+						for (const diff of diffs) {
+							const existingIdx = newDiffs.findIndex(d => d.file === diff.file);
+							if (existingIdx >= 0) {
+								newDiffs[existingIdx] = diff; // Update existing
+							} else {
+								newDiffs.push(diff); // Add new
+							}
+						}
+						this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: this.streamState[threadId]?.llmInfo?.displayContentSoFar || '', reasoningSoFar: this.streamState[threadId]?.llmInfo?.reasoningSoFar || '', thinkingSoFar: '', toolCallSoFar: this.streamState[threadId]?.llmInfo?.toolCallSoFar || null, parts: this.streamState[threadId]?.llmInfo?.parts, diffs: newDiffs }, interrupt: Promise.resolve(() => { if (llmCancelToken) this._llmMessageService.abort(llmCancelToken) }) })
+					},
+					onQuestion: ({ requestId, questions }) => {
+						// Store the question request ID in stream state so we can use it when user replies
+						// Set state to awaiting_user so UI disables chat input
+						console.log('[Tigerd] Question asked, setting state to awaiting_user, requestId:', requestId);
+						this._setStreamState(threadId, {
+							isRunning: 'awaiting_user',
+							questionRequestId: requestId,
+						});
+					},
+					onPermission: ({ requestId, permission }) => {
+						// Store the permission request ID in stream state so we can use it when user responds
+						console.log('[Tigerd] Permission asked, storing requestId:', requestId, 'permission:', permission);
+						const currentState = this.streamState[threadId];
+						if (currentState) {
+							this.streamState[threadId] = {
+								...currentState,
+								permissionRequestId: requestId,
+							} as typeof currentState;
+							this._onDidChangeStreamState.fire({ threadId });
+						} else {
+							this.streamState[threadId] = {
+								isRunning: undefined,
+								permissionRequestId: requestId,
+							};
+							this._onDidChangeStreamState.fire({ threadId });
+						}
 					},
 					onFinalMessage: async ({ fullText, fullReasoning, toolCall, anthropicReasoning, }) => {
 						resMessageIsDonePromise({ type: 'llmDone', toolCall, info: { fullText, fullReasoning, anthropicReasoning } }) // resolve with tool calls
@@ -839,7 +1033,9 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					break
 				}
 
-				this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: '', reasoningSoFar: '', toolCallSoFar: null }, interrupt: Promise.resolve(() => this._llmMessageService.abort(llmCancelToken)) })
+				// Preserve parts from streaming when setting up the wait state
+				const existingParts = this.streamState[threadId]?.llmInfo?.parts;
+				this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: '', reasoningSoFar: '', thinkingSoFar: '', toolCallSoFar: null, parts: existingParts }, interrupt: Promise.resolve(() => this._llmMessageService.abort(llmCancelToken)) })
 				const llmRes = await messageIsDonePromise // wait for message to complete
 
 				// if something else started running in the meantime
@@ -870,8 +1066,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					// error, but too many attempts
 					else {
 						const { error } = llmRes
-						const { displayContentSoFar, reasoningSoFar, toolCallSoFar } = this.streamState[threadId].llmInfo
-						this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar, reasoning: reasoningSoFar, anthropicReasoning: null })
+						const { displayContentSoFar, reasoningSoFar, toolCallSoFar, parts } = this.streamState[threadId].llmInfo
+						this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar, reasoning: reasoningSoFar, anthropicReasoning: null, parts })
 						if (toolCallSoFar) this._addMessageToThread(threadId, { role: 'interrupted_streaming_tool', name: toolCallSoFar.name, mcpServerName: this._computeMCPServerOfToolName(toolCallSoFar.name) })
 
 						this._setStreamState(threadId, { isRunning: undefined, error })
@@ -883,7 +1079,10 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				// llm res success
 				const { toolCall, info } = llmRes
 
-				this._addMessageToThread(threadId, { role: 'assistant', displayContent: info.fullText, reasoning: info.fullReasoning, anthropicReasoning: info.anthropicReasoning })
+				// Get parts from stream state to preserve opencode-style rendering
+				const streamParts = this.streamState[threadId]?.llmInfo?.parts
+				console.log('[Tigerd] Committing message with parts:', streamParts?.length, 'parts');
+				this._addMessageToThread(threadId, { role: 'assistant', displayContent: info.fullText, reasoning: info.fullReasoning, anthropicReasoning: info.anthropicReasoning, parts: streamParts })
 
 				this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' }) // just decorative for clarity
 
@@ -1632,25 +1831,48 @@ We only need to do it for files that were edited since `from`, ie files between 
 
 
 	openNewThread() {
-		// if a thread with 0 messages already exists, switch to it
+		// Always create a new thread - don't reuse empty threads
+		// This ensures each "New Chat" creates a separate thread with its own session
 		const { allThreads: currentThreads } = this.state
-		for (const threadId in currentThreads) {
-			if (currentThreads[threadId]!.messages.length === 0) {
-				// switch to the existing empty thread and exit
-				this.switchToThread(threadId)
-				return
-			}
-		}
-		// otherwise, start a new thread
 		const newThread = newThreadObject()
 
-		// update state
+		// update state FIRST, then create session
 		const newThreads: ChatThreads = {
 			...currentThreads,
 			[newThread.id]: newThread
 		}
 		this._storeAllThreads(newThreads)
 		this._setState({ allThreads: newThreads, currentThreadId: newThread.id })
+
+		// Create agent session for this thread (after thread is in state)
+		this._createSessionForThread(newThread.id)
+	}
+
+	// Create agent session for a thread via IPC
+	private async _createSessionForThread(threadId: string): Promise<void> {
+		try {
+			const workspaceFolder = this._workspaceContextService.getWorkspace().folders[0]?.uri.fsPath;
+			console.log('[Tigerd] Creating session for thread:', threadId, 'workspace:', workspaceFolder);
+
+			// Use IPC to create session (avoids CORS)
+			const channel = this._mainProcessService.getChannel('tigerd-agent');
+			const sessionId = await channel.call('createAgentSession', { workingDir: workspaceFolder || process.cwd() }) as string | null;
+
+			console.log('[Tigerd] Created session:', sessionId, 'for thread:', threadId);
+			if (sessionId) {
+				const thread = this.state.allThreads[threadId];
+				if (thread) {
+					const newThreads = {
+						...this.state.allThreads,
+						[threadId]: { ...thread, sessionId }
+					};
+					this._storeAllThreads(newThreads);
+					this._setState({ ...this.state, allThreads: newThreads });
+				}
+			}
+		} catch (error) {
+			console.error('[Tigerd] Error creating session for thread:', error);
+		}
 	}
 
 
@@ -1680,6 +1902,9 @@ We only need to do it for files that were edited since `from`, ie files between 
 		}
 		this._storeAllThreads(newThreads)
 		this._setState({ allThreads: newThreads })
+
+		// Create new agent session for duplicated thread
+		this._createSessionForThread(newThread.id)
 	}
 
 

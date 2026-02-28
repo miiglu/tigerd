@@ -1894,7 +1894,7 @@ const SingleDiffEditor = ({ block, lang }: { block: ExtractedSearchReplaceBlock,
 				readOnly: true,
 				renderSideBySide: true,
 				minimap: { enabled: false },
-				lineNumbers: 'off',
+				lineNumbers: 'on',
 				scrollbar: {
 					vertical: 'hidden',
 					horizontal: 'auto',
