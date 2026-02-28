@@ -126,7 +126,7 @@ export class NativeWindow extends BaseWindow {
 		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
 		@IPreferencesService private readonly preferencesService: IPreferencesService,
 		@IUtilityProcessWorkerWorkbenchService private readonly utilityProcessWorkerWorkbenchService: IUtilityProcessWorkerWorkbenchService,
-		@IHostService hostService: IHostService
+		@IHostService hostService: IHostService,
 	) {
 		super(mainWindow, undefined, hostService, nativeEnvironmentService);
 

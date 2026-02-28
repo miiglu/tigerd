@@ -71,6 +71,9 @@ export const defaultProviderSettings = {
 		region: 'us-east-1', // add region setting
 		endpoint: '', // optionally allow overriding default
 	},
+	opencode: {
+		// Tigerd Agent - free models built-in, no API key needed
+	},
 
 } as const
 
@@ -159,6 +162,14 @@ export const defaultModelsOfProvider = {
 	microsoftAzure: [],
 	awsBedrock: [],
 	liteLLM: [],
+	opencode: [
+		// Free models available via Tigerd Agent (OpenCode Zen) - lowercase
+		'big-pickle',
+		'qwen3-coder',
+		'grok',
+		'glm-4.7-nano',
+		'minimax-m2.5-free',
+	],
 
 
 } as const satisfies Record<ProviderName, string[]>
@@ -1480,6 +1491,60 @@ const modelSettingsOfProvider: { [providerName in ProviderName]: TigerdStaticPro
 	googleVertex: googleVertexSettings,
 	microsoftAzure: microsoftAzureSettings,
 	awsBedrock: awsBedrockSettings,
+	opencode: {
+		modelOptions: {
+			'big-pickle': {
+				contextWindow: 200_000,
+				reservedOutputTokenSpace: 16_384,
+				cost: { input: 0, output: 0 },
+				supportsFIM: true,
+				downloadable: false,
+				supportsSystemMessage: 'system-role' as const,
+				reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true },
+			},
+			'qwen3-coder': {
+				contextWindow: 200_000,
+				reservedOutputTokenSpace: 16_384,
+				cost: { input: 0, output: 0 },
+				supportsFIM: true,
+				downloadable: false,
+				supportsSystemMessage: 'system-role' as const,
+				reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true },
+			},
+			'grok': {
+				contextWindow: 200_000,
+				reservedOutputTokenSpace: 16_384,
+				cost: { input: 0, output: 0 },
+				supportsFIM: true,
+				downloadable: false,
+				supportsSystemMessage: 'system-role' as const,
+				reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true },
+			},
+			'glm-4.7-nano': {
+				contextWindow: 200_000,
+				reservedOutputTokenSpace: 16_384,
+				cost: { input: 0, output: 0 },
+				supportsFIM: true,
+				downloadable: false,
+				supportsSystemMessage: 'system-role' as const,
+				reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true },
+			},
+			'minimax-m2.5-free': {
+				contextWindow: 200_000,
+				reservedOutputTokenSpace: 16_384,
+				cost: { input: 0, output: 0 },
+				supportsFIM: true,
+				downloadable: false,
+				supportsSystemMessage: 'system-role' as const,
+				reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true },
+			},
+		},
+		modelOptionsFallback: () => null,
+		providerReasoningIOSettings: {
+			input: { includeInPayload: openAICompatIncludeInPayloadReasoning },
+			output: { nameOfFieldInDelta: 'reasoning' },
+		},
+	},
 } as const
 
 

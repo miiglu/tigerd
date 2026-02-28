@@ -133,6 +133,7 @@ import { LLMMessageChannel } from '../../workbench/contrib/tigerd/electron-main/
 import { TigerdSCMService } from '../../workbench/contrib/tigerd/electron-main/tigerdSCMMainService.js';
 import { ITigerdSCMService } from '../../workbench/contrib/tigerd/common/tigerdSCMTypes.js';
 import { MCPChannel } from '../../workbench/contrib/tigerd/electron-main/mcpChannel.js';
+import { stopTigerdAgent, restartTigerdAgentWithCredentials, TigerdAgentChannel, setStoredAuthToken } from './tigerdAgent.js';
 /**
  * The main VS Code application. There will only ever be one instance,
  * even if the user starts many instances (e.g. from the command line).
@@ -568,6 +569,8 @@ export class CodeApplication extends Disposable {
 				// windows.
 				mainProcessElectronServer.dispose();
 			}
+			// Stop tigerd-agent on shutdown
+			stopTigerdAgent();
 		});
 
 		// Resolve unique machine ID
@@ -611,6 +614,12 @@ export class CodeApplication extends Disposable {
 
 		// Signal phase: after window open
 		this.lifecycleMainService.phase = LifecycleMainPhase.AfterWindowOpen;
+
+		// Restore tigerd auth FIRST - this will start agent with credentials if token exists
+		await this.restoreTigerdAuth();
+
+		// Only start agent if auth was restored (otherwise wait for user to login)
+		// restoreTigerdAuth handles starting agent when token exists
 
 		// Post Open Windows Tasks
 		this.afterWindowOpen();
@@ -873,6 +882,73 @@ export class CodeApplication extends Disposable {
 
 	private async handleProtocolUrl(windowsMainService: IWindowsMainService, dialogMainService: IDialogMainService, urlService: IURLService, uri: URI, options?: IOpenURLOptions): Promise<boolean> {
 		this.logService.trace('app#handleProtocolUrl():', uri.toString(true), options);
+
+		// Handle tigerd:// protocol for authentication
+		// Format: tigerd://auth?token=xxx
+		if (uri.scheme === 'tigerd') {
+			this.logService.trace('app#handleProtocolUrl(): handling tigerd auth URL');
+			
+			if (uri.authority === 'auth') {
+				const params = new URLSearchParams(uri.query);
+				const token = params.get('token');
+				
+				if (token) {
+					this.logService.info('[Tigerd] Received auth token from tigerd:// URL');
+					
+					try {
+						// Fetch CF credentials from backend using the token
+						const backendUrl = 'http://localhost:8787';
+						this.logService.info('[Tigerd] Fetching CF credentials from backend...');
+						
+						const response = await fetch(`${backendUrl}/agent/config`, {
+							headers: {
+								'Authorization': `Bearer ${token}`,
+								'Content-Type': 'application/json',
+							},
+						});
+
+						if (!response.ok) {
+							throw new Error(`Failed to fetch config: ${response.status}`);
+						}
+
+						const config = await response.json();
+						this.logService.info('[Tigerd] Got CF credentials from backend:', { 
+							hasCfAccountId: !!config.cfAccountId,
+							hasCfApiToken: !!config.cfApiToken,
+						});
+
+						// Restart agent with credentials from backend
+						await restartTigerdAgentWithCredentials(this.logService, {
+							authToken: token,
+							cfAccountId: config.cfAccountId,
+							cfApiToken: config.cfApiToken,
+							cfGatewayId: config.cfGatewayId,
+						});
+
+						// Save token to file for persistence
+						const { app } = await import('electron');
+						const fs = await import('fs');
+						const path = await import('path');
+						const tokenPath = path.join(app.getPath('userData'), 'tigerd-auth.json');
+						fs.writeFileSync(tokenPath, JSON.stringify({ token, email: config.email }));
+
+						// Reload window to update UI state (IPC is blocked in VSCode sandbox)
+						const window = windowsMainService.getLastActiveWindow();
+						if (window) {
+							window.reload();
+						}
+
+						this.logService.info('[Tigerd] Auth completed successfully');
+						return true;
+					} catch (error) {
+						this.logService.error('[Tigerd] Auth failed:', error);
+					}
+				}
+			}
+			
+			this.logService.warn('[Tigerd] Unknown tigerd:// URL:', uri.toString(true));
+			return true; // handled but not successful
+		}
 
 		// Support 'workspace' URLs (https://github.com/microsoft/vscode/issues/124263)
 		if (uri.scheme === this.productService.urlProtocol && uri.path === 'workspace') {
@@ -1254,6 +1330,12 @@ export class CodeApplication extends Disposable {
 		const mcpChannel = new MCPChannel();
 		mainProcessElectronServer.registerChannel('tigerd-channel-mcp', mcpChannel);
 
+		// Tigerd Agent channel - for restarting with credentials
+		const tigerdAgentChannel = new TigerdAgentChannel(
+			accessor.get(ILogService),
+		);
+		mainProcessElectronServer.registerChannel('tigerd-agent', tigerdAgentChannel);
+
 		// Extension Host Debug Broadcasting
 		const electronExtensionHostDebugBroadcastChannel = new ElectronExtensionHostDebugBroadcastChannel(accessor.get(IWindowsMainService));
 		mainProcessElectronServer.registerChannel('extensionhostdebugservice', electronExtensionHostDebugBroadcastChannel);
@@ -1265,6 +1347,60 @@ export class CodeApplication extends Disposable {
 		// Utility Process Worker
 		const utilityProcessWorkerChannel = ProxyChannel.fromService(accessor.get(IUtilityProcessWorkerMainService), disposables);
 		mainProcessElectronServer.registerChannel(ipcUtilityProcessWorkerChannelName, utilityProcessWorkerChannel);
+	}
+
+	// Restore Tigerd auth from stored token on startup
+	private async restoreTigerdAuth(): Promise<void> {
+		try {
+			const { app } = await import('electron');
+			const fs = await import('fs');
+			const path = await import('path');
+			const tokenPath = path.join(app.getPath('userData'), 'tigerd-auth.json');
+			
+			if (!fs.existsSync(tokenPath)) {
+				return;
+			}
+
+			const authData = JSON.parse(fs.readFileSync(tokenPath, 'utf-8'));
+			if (!authData.token) {
+				return;
+			}
+
+			this.logService.info('[Tigerd] Restoring auth from stored token...');
+
+			// Validate token and get CF credentials from backend
+			const backendUrl = 'http://localhost:8787';
+			const response = await fetch(`${backendUrl}/agent/config`, {
+				headers: {
+					'Authorization': `Bearer ${authData.token}`,
+					'Content-Type': 'application/json',
+				},
+			});
+
+			if (!response.ok) {
+				this.logService.warn('[Tigerd] Stored token invalid, clearing...');
+				fs.unlinkSync(tokenPath);
+				return;
+			}
+
+			const config = await response.json();
+			this.logService.info('[Tigerd] Restored CF credentials from stored token');
+
+			// Restart agent with credentials
+			await restartTigerdAgentWithCredentials(this.logService, {
+				authToken: authData.token,
+				cfAccountId: config.cfAccountId,
+				cfApiToken: config.cfApiToken,
+				cfGatewayId: config.cfGatewayId,
+			});
+
+			// Store token in memory for renderer to query
+			setStoredAuthToken(authData.token);
+
+			this.logService.info('[Tigerd] Auth restored successfully');
+		} catch (error) {
+			this.logService.error('[Tigerd] Failed to restore auth:', error);
+		}
 	}
 
 	private async openFirstWindow(accessor: ServicesAccessor, initialProtocolUrls: IInitialProtocolUrls | undefined): Promise<ICodeWindow[]> {

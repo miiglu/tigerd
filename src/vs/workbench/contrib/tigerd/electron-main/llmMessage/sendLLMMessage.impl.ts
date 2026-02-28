@@ -11,13 +11,14 @@
 
 // disable foreign import complaints
 /* eslint-disable */
-import Anthropic from '@anthropic-ai/sdk';
+
 import { Ollama } from 'ollama';
 import OpenAI, { ClientOptions, AzureOpenAI } from 'openai';
 import { MistralCore } from '@mistralai/mistralai/core.js';
 import { fimComplete } from '@mistralai/mistralai/funcs/fimComplete.js';
 import { Tool as GeminiTool, FunctionDeclaration, GoogleGenAI, ThinkingConfig, Schema, Type } from '@google/genai';
 import { GoogleAuth } from 'google-auth-library'
+import Anthropic from '@anthropic-ai/sdk';
 /* eslint-enable */
 
 import { AnthropicLLMChatMessage, GeminiLLMChatMessage, LLMChatMessage, LLMFIMMessage, ModelListParams, OllamaModelResponse, OnError, OnFinalMessage, OnText, RawToolCallObj, RawToolParamsObj } from '../../common/sendLLMMessageTypes.js';
@@ -940,6 +941,12 @@ export const sendLLMMessageToProviderImplementation = {
 	},
 	awsBedrock: {
 		sendChat: (params) => _sendOpenAICompatibleChat(params),
+		sendFIM: null,
+		list: null,
+	},
+	// Tigerd Agent - handled by tigerd-agent, not directly
+	opencode: {
+		sendChat: async () => { /* handled by tigerd-agent */ },
 		sendFIM: null,
 		list: null,
 	},

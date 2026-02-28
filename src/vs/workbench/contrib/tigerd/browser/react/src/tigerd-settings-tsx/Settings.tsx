@@ -13,7 +13,7 @@ import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { ProviderName, SettingName, displayInfoOfSettingName, providerNames, TigerdStatefulModelInfo, customSettingNamesOfProvider, RefreshableProviderName, refreshableProviderNames, displayInfoOfProviderName, nonlocalProviderNames, localProviderNames, GlobalSettingName, featureNames, displayInfoOfFeatureName, isProviderNameDisabled, FeatureName, hasDownloadButtonsOnModelsProviderNames, subTextMdOfProviderName } from '../../../../common/tigerdSettingsTypes.js'
 import ErrorBoundary from '../sidebar-tsx/ErrorBoundary.js'
 import { TigerdButtonBgDarken, TigerdCustomDropdownBox, TigerdInputBox2, TigerdSimpleInputBox, TigerdSwitch } from '../util/inputs.js'
-import { useAccessor, useIsDark, useIsOptedOut, useRefreshModelListener, useRefreshModelState, useSettingsState } from '../util/services.js'
+import { useAccessor, useIsDark, useIsOptedOut, useRefreshModelListener, useRefreshModelState, useSettingsState, useLogin, useLogout, useAuthLoading, useSubmitToken, setAuthLoading } from '../util/services.js'
 import { X, RefreshCw, Loader2, Check, Asterisk, Plus } from 'lucide-react'
 import { URI } from '../../../../../../../base/common/uri.js'
 import { ModelDropdown } from './ModelDropdown.js'
@@ -1056,12 +1056,31 @@ export const Settings = () => {
 	const environmentService = accessor.get('IEnvironmentService')
 	const nativeHostService = accessor.get('INativeHostService')
 	const settingsState = useSettingsState()
+	const login = useLogin()
+	const logout = useLogout()
+	const authLoading = useAuthLoading()
+	const submitToken = useSubmitToken()
 	const tigerdSettingsService = accessor.get('ITigerdSettingsService')
-	const chatThreadsService = accessor.get('IChatThreadService')
-	const notificationService = accessor.get('INotificationService')
-	const mcpService = accessor.get('IMCPService')
-	const storageService = accessor.get('IStorageService')
-	const metricsService = accessor.get('IMetricsService')
+
+	// Listen for auth result from main process and clear loading state
+	const { useEffect } = require('react')
+	useEffect(() => {
+		const handleAuthResult = (_event: unknown, data: { success: boolean }) => {
+			setAuthLoading(false)
+		}
+		// @ts-ignore - electron global
+		if (typeof window !== 'undefined' && window.vscode) {
+			// @ts-ignore
+			window.vscode?.onMessage?.((data: any) => {
+				if (data.type === 'tigerd-auth-result') {
+					setAuthLoading(false)
+				}
+			})
+		}
+	}, [])
+
+	// Check if user is authenticated
+	const isAuthenticated = settingsState.isAuthenticated
 	const isOptedOut = useIsOptedOut()
 
 	const onDownload = (t: 'Chats' | 'Settings') => {
@@ -1444,6 +1463,72 @@ export const Settings = () => {
 												Reset Chats
 											</ConfirmButton>
 										</div>
+									</div>
+								</div>
+
+
+								{/* Account section */}
+								<div>
+									<h2 className='text-3xl mb-2'>Account</h2>
+									<h4 className='text-void-fg-3 mb-4'>{`Sign in to use Tigerd Agent with Cloudflare AI.`}</h4>
+									<div className='flex flex-col gap-2 max-w-48 w-full'>
+										{isAuthenticated ? (
+											<>
+												<div className='flex items-center gap-2 text-green-500'>
+													<span>●</span> Signed in
+												</div>
+												<TigerdButtonBgDarken className='px-4 py-1 w-full' onClick={logout}>
+													Sign Out
+												</TigerdButtonBgDarken>
+											</>
+										) : authLoading ? (
+											<>
+												<div className='flex items-center gap-2 text-yellow-500'>
+													<span>●</span> Signing in...
+												</div>
+												<div className='text-void-fg-3 text-sm'>
+													Processing...
+												</div>
+											</>
+										) : (
+											<>
+												<div className='text-void-fg-3 text-sm mb-2'>
+													Sign in to enable Tigerd Agent
+												</div>
+												<TigerdButtonBgDarken className='px-4 py-1 w-full' onClick={login}>
+													Sign In
+												</TigerdButtonBgDarken>
+												
+												<div className='mt-4 pt-4 border-t border-void-border-2'>
+													<div className='text-xs text-void-fg-3 mb-2'>
+														Or paste token from login:
+													</div>
+													<form onSubmit={async (e) => {
+														e.preventDefault();
+														const form = e.target as HTMLFormElement;
+														const token = (form.elements.namedItem('tokenInput') as HTMLInputElement)?.value;
+														if (!token) return;
+														
+												const result = await submitToken(token);
+												if (result.success) {
+													// Update settings state to reflect authentication
+													await tigerdSettingsService.setAuthToken(result.token);
+												} else {
+													alert('Error: ' + result.error);
+												}
+													}}>
+														<input 
+															name='tokenInput'
+															placeholder='Paste token...'
+															className='w-full px-2 py-1 text-sm bg-void-bg-1 border border-void-border-2 rounded mb-2'
+														/>
+														<button type='submit' className='text-sm bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded w-full'>
+															Submit Token
+														</button>
+													</form>
+												</div>
+											</>
+										)}
 									</div>
 								</div>
 

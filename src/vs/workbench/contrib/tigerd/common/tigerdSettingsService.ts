@@ -16,6 +16,7 @@ import { IEncryptionService } from '../../../../platform/encryption/common/encry
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { IMetricsService } from './metricsService.js';
 import { defaultProviderSettings, getModelCapabilities, ModelOverrides } from './modelCapabilities.js';
 import { VOID_SETTINGS_STORAGE_KEY } from './storageKeys.js';
@@ -50,6 +51,8 @@ export type TigerdSettingsState = {
 	readonly overridesOfModel: OverridesOfModel;
 	readonly globalSettings: GlobalSettings;
 	readonly mcpUserStateOfName: MCPUserStateOfName; // user-controlled state of MCP servers
+	readonly authToken: string | null; // authentication token from tigerd-website
+	readonly isAuthenticated: boolean; // derived from authToken
 
 	readonly _modelOptions: ModelOption[] // computed based on the two above items
 }
@@ -85,6 +88,13 @@ export interface ITigerdSettingsService {
 	addMCPUserStateOfNames(userStateOfName: MCPUserStateOfName): Promise<void>;
 	removeMCPUserStateOfNames(serverNames: string[]): Promise<void>;
 	setMCPServerState(serverName: string, state: MCPUserState): Promise<void>;
+
+	// Auth methods
+	setAuthToken(token: string | null): Promise<void>;
+	getAuthToken(): string | null;
+	getIsAuthenticated(): boolean;
+	getLoginUrl(): string;
+	logout(): Promise<void>;
 }
 
 
@@ -226,6 +236,8 @@ const defaultState = () => {
 		overridesOfModel: deepClone(defaultOverridesOfModel),
 		_modelOptions: [], // computed later
 		mcpUserStateOfName: {},
+		authToken: null,
+		isAuthenticated: false,
 	}
 	return d
 }
@@ -247,6 +259,7 @@ class TigerdSettingsService extends Disposable implements ITigerdSettingsService
 		@IStorageService private readonly _storageService: IStorageService,
 		@IEncryptionService private readonly _encryptionService: IEncryptionService,
 		@IMetricsService private readonly _metricsService: IMetricsService,
+		@IMainProcessService private readonly _mainProcessService: IMainProcessService,
 		// could have used this, but it's clearer the way it is (+ slightly different eg StorageTarget.USER)
 		// @ISecretStorageService private readonly _secretStorageService: ISecretStorageService,
 	) {
@@ -282,6 +295,36 @@ class TigerdSettingsService extends Disposable implements ITigerdSettingsService
 		let readS: TigerdSettingsState
 		try {
 			readS = await this._readState();
+
+			// Check main process for auth state (sync with main process after auth restoration)
+			// This handles the case where main process restored auth on startup
+			try {
+				const channel = this._mainProcessService.getChannel('tigerd-agent');
+				const authState: { isAuthenticated?: boolean; token?: string } = await channel.call('getAuthState', {});
+				console.log('[TigerdSettings] Got auth state from main process:', authState);
+				if (authState?.isAuthenticated === true) {
+					// Main process has authenticated - sync to renderer
+					if (!readS.isAuthenticated && authState.token) {
+						console.log('[TigerdSettings] Syncing auth token from main process');
+						// Renderer doesn't know - set auth token from main process
+						await this.setAuthToken(authState.token);
+					} else if (!readS.isAuthenticated && readS.authToken) {
+						// Has token in storage, just update isAuthenticated flag
+						this.state = { ...this.state, isAuthenticated: true };
+						this._onDidChangeState.fire();
+					}
+				} else if (!authState?.isAuthenticated && readS.authToken) {
+					// Main process says not authenticated but renderer has token in storage
+					// This can happen if token was cleared from file but storage wasn't cleared
+					// Clear the stored token to sync state
+					console.log('[TigerdSettings] Clearing stale token from storage');
+					await this.setAuthToken(null);
+				}
+			} catch (e) {
+				console.log('[TigerdSettings] Could not get auth state from main process:', e);
+				// Main process channel not available yet
+			}
+
 			// 1.0.3 addition, remove when enough users have had this code run
 			if (readS.globalSettings.includeToolLintErrors === undefined) readS.globalSettings.includeToolLintErrors = true
 
@@ -396,6 +439,8 @@ class TigerdSettingsService extends Disposable implements ITigerdSettingsService
 			globalSettings: newGlobalSettings,
 			overridesOfModel: newOverridesOfModel,
 			mcpUserStateOfName: newMCPUserStateOfName,
+			authToken: this.state.authToken,
+			isAuthenticated: this.state.isAuthenticated,
 		}
 
 		this.state = _validatedModelState(newState)
@@ -614,6 +659,60 @@ class TigerdSettingsService extends Disposable implements ITigerdSettingsService
 		await this._setMCPUserStateOfName(newMCPServerStates)
 		this._metricsService.capture('Update MCP Server State', { serverName, state });
 	}
+
+	// Auth methods
+	setAuthToken = async (token: string | null) => {
+		const newState = {
+			...this.state,
+			authToken: token,
+			isAuthenticated: token !== null,
+		};
+		await this.dangerousSetState(newState);
+		this._metricsService.capture('Auth Token Set', { hasToken: token !== null });
+	};
+
+	getAuthToken = (): string | null => {
+		return this.state.authToken;
+	};
+
+	getIsAuthenticated = (): boolean => {
+		return this.state.isAuthenticated;
+	};
+
+	getLoginUrl = (): string => {
+		// The login URL - tigerd-website will redirect back with token
+		// For now, always use localhost:5173 for dev
+		// In production, this would be https://tigerd.ai
+		return `http://localhost:5173/login?device=true`;
+	};
+
+	logout = async () => {
+		// Tell main process to clear auth and stop agent
+		try {
+			const channel = this._mainProcessService.getChannel('tigerd-agent');
+			await channel.call('logout', {});
+		} catch (e) {
+			// Main process not available
+		}
+		
+		// Clear local auth state
+		await this.setAuthToken(null);
+		
+		// Delete auth file
+		try {
+			const { app } = await import('electron');
+			const fs = await import('fs');
+			const path = await import('path');
+			const tokenPath = path.join(app.getPath('userData'), 'tigerd-auth.json');
+			if (fs.existsSync(tokenPath)) {
+				fs.unlinkSync(tokenPath);
+			}
+		} catch (e) {
+			// Ignore errors
+		}
+		
+		this._metricsService.capture('User Logout', {});
+	};
 
 }
 

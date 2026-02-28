@@ -20,7 +20,7 @@ type UnionOfKeys<T> = T extends T ? keyof T : never;
 
 
 export type ProviderName = keyof typeof defaultProviderSettings
-export const providerNames = Object.keys(defaultProviderSettings) as ProviderName[]
+export const providerNames = ['opencode', ...Object.keys(defaultProviderSettings).filter(k => k !== 'opencode')] as ProviderName[]
 
 export const localProviderNames = ['ollama', 'vLLM', 'lmStudio'] satisfies ProviderName[] // all local names
 export const nonlocalProviderNames = providerNames.filter((name) => !(localProviderNames as string[]).includes(name)) // all non-local names
@@ -112,6 +112,9 @@ export const displayInfoOfProviderName = (providerName: ProviderName): DisplayIn
 	else if (providerName === 'awsBedrock') {
 		return { title: 'AWS Bedrock', }
 	}
+	else if (providerName === 'opencode') {
+		return { title: 'Tigerd Agent', desc: 'Free built-in models' }
+	}
 
 	throw new Error(`descOfProviderName: Unknown provider name: "${providerName}"`)
 }
@@ -134,6 +137,7 @@ export const subTextMdOfProviderName = (providerName: ProviderName): string => {
 	if (providerName === 'vLLM') return 'Read more about custom [Endpoints here](https://docs.vllm.ai/en/latest/getting_started/quickstart.html#openai-compatible-server).'
 	if (providerName === 'lmStudio') return 'Read more about custom [Endpoints here](https://lmstudio.ai/docs/app/api/endpoints/openai).'
 	if (providerName === 'liteLLM') return 'Read more about endpoints [here](https://docs.litellm.ai/docs/providers/openai_compatible).'
+	if (providerName === 'opencode') return 'Free built-in models via Tigerd Agent. No API key required.'
 
 	throw new Error(`subTextMdOfProviderName: Unknown provider name: "${providerName}"`)
 }
@@ -358,6 +362,12 @@ export const defaultSettingsOfProvider: SettingsOfProvider = {
 		...modelInfoOfDefaultModelNames(defaultModelsOfProvider.awsBedrock),
 		_didFillInProviderSettings: undefined,
 	},
+	opencode: {
+		...defaultCustomSettings,
+		...defaultProviderSettings.opencode,
+		...modelInfoOfDefaultModelNames(defaultModelsOfProvider.opencode),
+		_didFillInProviderSettings: true, // No settings needed, always available
+	},
 }
 
 
@@ -458,6 +468,10 @@ export type GlobalSettings = {
 	isOnboardingComplete: boolean;
 	disableSystemMessage: boolean;
 	autoAcceptLLMChanges: boolean;
+	// Cloudflare credentials for authenticated users
+	cfAccountId: string;
+	cfApiToken: string;
+	cfGatewayId: string;
 }
 
 export const defaultGlobalSettings: GlobalSettings = {
@@ -474,6 +488,9 @@ export const defaultGlobalSettings: GlobalSettings = {
 	isOnboardingComplete: false,
 	disableSystemMessage: false,
 	autoAcceptLLMChanges: false,
+	cfAccountId: '',
+	cfApiToken: '',
+	cfGatewayId: '',
 }
 
 export type GlobalSettingName = keyof GlobalSettings

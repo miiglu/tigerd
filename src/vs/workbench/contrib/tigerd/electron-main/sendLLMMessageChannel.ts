@@ -14,7 +14,7 @@
 
 import { IServerChannel } from '../../../../base/parts/ipc/common/ipc.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
-import { EventLLMMessageOnTextParams, EventLLMMessageOnErrorParams, EventLLMMessageOnFinalMessageParams, MainSendLLMMessageParams, AbortRef, SendLLMMessageParams, MainLLMMessageAbortParams, ModelListParams, EventModelListOnSuccessParams, EventModelListOnErrorParams, OllamaModelResponse, OpenaiCompatibleModelResponse, MainModelListParams, } from '../common/sendLLMMessageTypes.js';
+import { EventLLMMessageOnTextParams, EventLLMMessageOnErrorParams, EventLLMMessageOnFinalMessageParams, EventLLMMessageOnQuestionParams, EventLLMMessageOnPermissionParams, MainSendLLMMessageParams, AbortRef, SendLLMMessageParams, MainLLMMessageAbortParams, ModelListParams, EventModelListOnSuccessParams, EventModelListOnErrorParams, OllamaModelResponse, OpenaiCompatibleModelResponse, MainModelListParams, } from '../common/sendLLMMessageTypes.js';
 import { sendLLMMessage } from './llmMessage/sendLLMMessage.js'
 import { IMetricsService } from '../common/metricsService.js';
 import { sendLLMMessageToProviderImplementation } from './llmMessage/sendLLMMessage.impl.js';
@@ -28,6 +28,8 @@ export class LLMMessageChannel implements IServerChannel {
 		onText: new Emitter<EventLLMMessageOnTextParams>(),
 		onFinalMessage: new Emitter<EventLLMMessageOnFinalMessageParams>(),
 		onError: new Emitter<EventLLMMessageOnErrorParams>(),
+		onQuestion: new Emitter<EventLLMMessageOnQuestionParams>(),
+		onPermission: new Emitter<EventLLMMessageOnPermissionParams>(),
 	}
 
 	// aborters for above
@@ -62,6 +64,8 @@ export class LLMMessageChannel implements IServerChannel {
 		if (event === 'onText_sendLLMMessage') return this.llmMessageEmitters.onText.event;
 		else if (event === 'onFinalMessage_sendLLMMessage') return this.llmMessageEmitters.onFinalMessage.event;
 		else if (event === 'onError_sendLLMMessage') return this.llmMessageEmitters.onError.event;
+		else if (event === 'onQuestion_sendLLMMessage') return this.llmMessageEmitters.onQuestion.event;
+		else if (event === 'onPermission_sendLLMMessage') return this.llmMessageEmitters.onPermission.event;
 		// list
 		else if (event === 'onSuccess_list_ollama') return this.listEmitters.ollama.success.event;
 		else if (event === 'onError_list_ollama') return this.listEmitters.ollama.error.event;
@@ -97,7 +101,8 @@ export class LLMMessageChannel implements IServerChannel {
 
 	// the only place sendLLMMessage is actually called
 	private _callSendLLMMessage(params: MainSendLLMMessageParams) {
-		const { requestId } = params;
+		const { requestId, threadId, sessionId } = params;
+		console.log('[Channel] _callSendLLMMessage - requestId:', requestId, 'threadId:', threadId, 'sessionId:', sessionId);
 
 		if (!(requestId in this._infoOfRunningRequest))
 			this._infoOfRunningRequest[requestId] = { waitForSend: undefined, abortRef: { current: null } }
@@ -105,14 +110,25 @@ export class LLMMessageChannel implements IServerChannel {
 		const mainThreadParams: SendLLMMessageParams = {
 			...params,
 			onText: (p) => {
-				this.llmMessageEmitters.onText.fire({ requestId, ...p });
+				console.log('[Channel] onText fired, requestId:', requestId, 'threadId:', threadId, 'fullText length:', p.fullText?.length);
+				this.llmMessageEmitters.onText.fire({ requestId, threadId, ...p });
 			},
 			onFinalMessage: (p) => {
-				this.llmMessageEmitters.onFinalMessage.fire({ requestId, ...p });
+				console.log('[Channel] onFinalMessage fired, requestId:', requestId, 'threadId:', threadId);
+				this.llmMessageEmitters.onFinalMessage.fire({ requestId, threadId, ...p });
 			},
 			onError: (p) => {
-				console.log('sendLLM: firing err');
-				this.llmMessageEmitters.onError.fire({ requestId, ...p });
+				console.log('[Channel] onError fired, requestId:', requestId, 'threadId:', threadId);
+				this.llmMessageEmitters.onError.fire({ requestId, threadId, ...p });
+			},
+			onQuestion: (p) => {
+				console.log('[Channel] onQuestion fired, requestId:', requestId, 'threadId:', threadId);
+				// p already contains requestId from the callback, so use it directly
+				this.llmMessageEmitters.onQuestion.fire({ ...p, requestId, threadId });
+			},
+			onPermission: (p) => {
+				console.log('[Channel] onPermission fired, requestId:', requestId, 'threadId:', threadId);
+				this.llmMessageEmitters.onPermission.fire({ ...p, requestId, threadId });
 			},
 			abortRef: this._infoOfRunningRequest[requestId].abortRef,
 		}

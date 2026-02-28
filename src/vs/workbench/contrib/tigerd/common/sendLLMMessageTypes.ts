@@ -13,6 +13,211 @@ import { InternalToolInfo } from './prompt/prompts.js'
 import { ToolName, ToolParamName } from './toolsServiceTypes.js'
 import { ChatMode, ModelSelection, ModelSelectionOptions, OverridesOfModel, ProviderName, RefreshableProviderName, SettingsOfProvider } from './tigerdSettingsTypes.js'
 
+// =====================================================
+// PART TYPES FROM OPENCODE SDK (for streaming)
+// =====================================================
+
+// Tool State types
+export type ToolStatePending = {
+	status: 'pending';
+	input: { [key: string]: unknown };
+	raw: string;
+};
+
+export type ToolStateRunning = {
+	status: 'running';
+	input: { [key: string]: unknown };
+	title?: string;
+	metadata?: { [key: string]: unknown };
+	time: { start: number };
+};
+
+export type ToolStateCompleted = {
+	status: 'completed';
+	input: { [key: string]: unknown };
+	output: string;
+	title: string;
+	metadata: { [key: string]: unknown };
+	time: { start: number; end: number; compacted?: number };
+	attachments?: FilePart[];
+};
+
+export type ToolStateError = {
+	status: 'error';
+	input: { [key: string]: unknown };
+	error: string;
+	metadata?: { [key: string]: unknown };
+	time: { start: number; end: number };
+};
+
+export type ToolState = ToolStatePending | ToolStateRunning | ToolStateCompleted | ToolStateError;
+
+// Part types
+export type TextPart = {
+	id: string;
+	sessionID: string;
+	messageID: string;
+	type: 'text';
+	text: string;
+	synthetic?: boolean;
+	ignored?: boolean;
+	time?: { start: number; end?: number };
+	metadata?: { [key: string]: unknown };
+};
+
+export type ReasoningPart = {
+	id: string;
+	sessionID: string;
+	messageID: string;
+	type: 'reasoning';
+	text: string;
+	metadata?: { [key: string]: unknown };
+	time: { start: number; end?: number };
+};
+
+export type FilePartSourceText = {
+	value: string;
+	start: number;
+	end: number;
+};
+
+export type FileSource = {
+	text: FilePartSourceText;
+	type: 'file';
+	path: string;
+};
+
+export type SymbolSource = {
+	text: FilePartSourceText;
+	type: 'symbol';
+	path: string;
+	range: { start: { line: number; character: number }; end: { line: number; character: number } };
+	name: string;
+	kind: number;
+};
+
+export type ResourceSource = {
+	text: FilePartSourceText;
+	type: 'resource';
+	clientName: string;
+	uri: string;
+};
+
+export type FilePartSource = FileSource | SymbolSource | ResourceSource;
+
+export type FilePart = {
+	id: string;
+	sessionID: string;
+	messageID: string;
+	type: 'file';
+	mime: string;
+	filename?: string;
+	url: string;
+	source?: FilePartSource;
+};
+
+export type ToolPart = {
+	id: string;
+	sessionID: string;
+	messageID: string;
+	type: 'tool';
+	callID: string;
+	tool: string;
+	state: ToolState;
+	metadata?: { [key: string]: unknown };
+};
+
+export type StepStartPart = {
+	id: string;
+	sessionID: string;
+	messageID: string;
+	type: 'step-start';
+	snapshot?: string;
+};
+
+export type StepFinishPart = {
+	id: string;
+	sessionID: string;
+	messageID: string;
+	type: 'step-finish';
+	reason: string;
+	snapshot?: string;
+	cost: number;
+	tokens: {
+		total?: number;
+		input: number;
+		output: number;
+		reasoning: number;
+		cache: { read: number; write: number };
+	};
+};
+
+export type SnapshotPart = {
+	id: string;
+	sessionID: string;
+	messageID: string;
+	type: 'snapshot';
+	snapshot: string;
+};
+
+export type PatchPart = {
+	id: string;
+	sessionID: string;
+	messageID: string;
+	type: 'patch';
+	hash: string;
+	files: string[];
+};
+
+export type AgentPart = {
+	id: string;
+	sessionID: string;
+	messageID: string;
+	type: 'agent';
+	agent: string;
+	prompt: string;
+};
+
+export type RetryPart = {
+	id: string;
+	sessionID: string;
+	messageID: string;
+	type: 'retry';
+	prompt: string;
+};
+
+export type CompactionPart = {
+	id: string;
+	sessionID: string;
+	messageID: string;
+	type: 'compaction';
+	originalMessageIDs: string[];
+};
+
+export type SubtaskPart = {
+	id: string;
+	sessionID: string;
+	messageID: string;
+	type: 'subtask';
+	prompt: string;
+	description: string;
+	agent: string;
+	model?: { providerID: string; modelID: string };
+	command?: string;
+};
+
+// Union of all part types
+export type Part = TextPart | SubtaskPart | ReasoningPart | FilePart | ToolPart | StepStartPart | StepFinishPart | SnapshotPart | PatchPart | AgentPart | RetryPart | CompactionPart;
+
+// Event types
+export type EventMessagePartUpdated = {
+	type: 'message.part.updated';
+	properties: {
+		part: Part;
+		delta?: string;
+	};
+};
+
 
 export const errorDetails = (fullError: Error | null): string | null => {
 	if (fullError === null) {
@@ -97,8 +302,28 @@ export type RawToolCallObj = {
 
 export type AnthropicReasoning = ({ type: 'thinking'; thinking: any; signature: string; } | { type: 'redacted_thinking', data: any })
 
-export type OnText = (p: { fullText: string; fullReasoning: string; toolCall?: RawToolCallObj }) => void
-export type OnFinalMessage = (p: { fullText: string; fullReasoning: string; toolCall?: RawToolCallObj; anthropicReasoning: AnthropicReasoning[] | null }) => void // id is tool_use_id
+// Real-time file diff from opencode
+export type FileDiff = {
+	file: string;
+	before: string;
+	after: string;
+	additions: number;
+	deletions: number;
+	status?: 'added' | 'deleted' | 'modified';
+}
+
+// Streaming parts array - allows sequential rendering like opencode
+export type OnText = (p: { 
+	fullText: string; 
+	fullReasoning: string; 
+	thinkingSoFar?: string; 
+	toolCall?: RawToolCallObj; 
+	parts?: Part[]  // All parts for sequential rendering
+}) => void
+export type OnDiff = (p: { diffs: FileDiff[] }) => void
+export type OnQuestion = (p: { requestId: string; questions: any[] }) => void  // Called when AI asks a question
+export type OnPermission = (p: { requestId: string; permission: any }) => void  // Called when AI needs permission for a tool
+export type OnFinalMessage = (p: { fullText: string; fullReasoning: string; thinkingSoFar?: string; toolCall?: RawToolCallObj; anthropicReasoning: AnthropicReasoning[] | null; parts?: Part[] }) => void // id is tool_use_id
 export type OnError = (p: { message: string; fullError: Error | null }) => void
 export type OnAbort = () => void
 export type AbortRef = { current: (() => void) | null }
@@ -118,6 +343,9 @@ type SendLLMType = {
 }
 export type ServiceSendLLMMessageParams = {
 	onText: OnText;
+	onDiff?: OnDiff;
+	onQuestion?: OnQuestion;
+	onPermission?: OnPermission;
 	onFinalMessage: OnFinalMessage;
 	onError: OnError;
 	logging: { loggingName: string, loggingExtras?: { [k: string]: any } };
@@ -125,11 +353,17 @@ export type ServiceSendLLMMessageParams = {
 	modelSelectionOptions: ModelSelectionOptions | undefined;
 	overridesOfModel: OverridesOfModel | undefined;
 	onAbort: OnAbort;
+	workspaceFolder?: string; // active workspace folder path
+	sessionId?: string; // agent session ID for this thread
+	threadId?: string; // UI thread ID for routing callbacks
 } & SendLLMType;
 
 // params to the true sendLLMMessage function
 export type SendLLMMessageParams = {
 	onText: OnText;
+	onDiff?: OnDiff;  // Real-time diffs from opencode
+	onQuestion?: OnQuestion;
+	onPermission?: OnPermission;
 	onFinalMessage: OnFinalMessage;
 	onError: OnError;
 	logging: { loggingName: string, loggingExtras?: { [k: string]: any } };
@@ -141,19 +375,26 @@ export type SendLLMMessageParams = {
 
 	settingsOfProvider: SettingsOfProvider;
 	mcpTools: InternalToolInfo[] | undefined;
+	workspaceFolder?: string; // active workspace folder path
+	authToken: string | null;
+	isAuthenticated: boolean;
+	sessionId?: string; // agent session ID for this thread
+	threadId?: string; // UI thread ID for routing callbacks
 } & SendLLMType
 
 
 
 // can't send functions across a proxy, use listeners instead
-export type BlockedMainLLMMessageParams = 'onText' | 'onFinalMessage' | 'onError' | 'abortRef'
-export type MainSendLLMMessageParams = Omit<SendLLMMessageParams, BlockedMainLLMMessageParams> & { requestId: string } & SendLLMType
+export type BlockedMainLLMMessageParams = 'onText' | 'onFinalMessage' | 'onError' | 'onQuestion' | 'onPermission' | 'abortRef'
+export type MainSendLLMMessageParams = Omit<SendLLMMessageParams, BlockedMainLLMMessageParams> & { requestId: string; threadId?: string } & SendLLMType
 
 export type MainLLMMessageAbortParams = { requestId: string }
 
-export type EventLLMMessageOnTextParams = Parameters<OnText>[0] & { requestId: string }
-export type EventLLMMessageOnFinalMessageParams = Parameters<OnFinalMessage>[0] & { requestId: string }
-export type EventLLMMessageOnErrorParams = Parameters<OnError>[0] & { requestId: string }
+export type EventLLMMessageOnTextParams = Parameters<OnText>[0] & { requestId: string; threadId?: string }
+export type EventLLMMessageOnFinalMessageParams = Parameters<OnFinalMessage>[0] & { requestId: string; threadId?: string }
+export type EventLLMMessageOnErrorParams = Parameters<OnError>[0] & { requestId: string; threadId?: string }
+export type EventLLMMessageOnQuestionParams = Parameters<OnQuestion>[0] & { requestId: string; threadId?: string }
+export type EventLLMMessageOnPermissionParams = Parameters<OnPermission>[0] & { requestId: string; threadId?: string }
 
 // service -> main -> internal -> event (back to main)
 // (browser)
